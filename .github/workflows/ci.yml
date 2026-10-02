@@ -50,49 +50,12 @@ jobs:
 
       - run: npm ci
 
-      - name: Apply the schema, the policies, the roles and the seed
-        run: |
-          for f in sql/01-schema.sql sql/02-rls.sql sql/03-roles.sql sql/04-seed.sql; do
-            echo "== $f"
-            psql "$SUPER" -v ON_ERROR_STOP=1 -q -f "$f"
-          done
-
-      - name: Every table except the tenant root has a FORCE policy
-        run: |
-          psql "$SUPER" -v ON_ERROR_STOP=1 -t -A -c "
-            SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE n.nspname = 'public' AND c.relkind = 'r'
-              AND c.relname <> 'tenant'
-              AND (NOT c.relrowsecurity OR NOT c.relforcerowsecurity);" | tee unprotected.txt
-          [ "$(cat unprotected.txt)" = "0" ]
-
-      - name: The four guarantees hold, run as the unprivileged role
-        run: psql "$APP" -v ON_ERROR_STOP=1 -f test/isolation.sql
-
-      - name: The isolation test refuses to run as a superuser
-        run: |
-          if psql "$SUPER" -v ON_ERROR_STOP=1 -f test/isolation.sql; then
-            echo "the guard did not fire: the test passed as a superuser"; exit 1
-          fi
-          echo "ok: the test refused to run as a superuser"
-
-      - name: Set up the leak demonstrations
-        run: psql "$SUPER" -v ON_ERROR_STOP=1 -q -f test/00-setup-demos.sql
-
-      - name: Reproduce the leak when FORCE is missing
-        run: psql "$OWNER" -v ON_ERROR_STOP=1 -f test/leak-without-force.sql
-
-      - name: Reproduce the leak when the setting is not transaction-scoped
-        run: psql "$APP" -v ON_ERROR_STOP=1 -f test/leak-without-local.sql
-
-      - name: Reproduce the leak when a table is added and the policy is not
-        run: psql "$OWNER" -v ON_ERROR_STOP=1 -f test/leak-forgotten-table.sql
-
-      - name: Reproduce the leak when a second permissive policy is added
-        run: psql "$OWNER" -v ON_ERROR_STOP=1 -f test/leak-extra-permissive-policy.sql
-
-      - name: Reproduce the superuser bypass
-        run: psql "$SUPER" -v ON_ERROR_STOP=1 -f test/leak-as-superuser.sql
+      # One call, not nine inline copies. The nine steps used to live here as well as in
+      # the script, which is the drift CLAUDE.md claims this arrangement prevents — and
+      # running the script here is also the only check that its paths work outside the
+      # compose container, which for a while they did not.
+      - name: Apply everything and prove it
+        run: ./scripts/prove.sh
 
       - name: The client helper upholds the rule through a real pool
         run: npm run prove
