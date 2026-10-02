@@ -33,14 +33,23 @@ export function createPool(options: PoolOptions = {}): Pool {
   const connectionString = options.connectionString ?? process.env.DATABASE_URL;
   if (!connectionString) throw new Error("DATABASE_URL is not set");
 
-  // node-postgres reads `sslmode=require` as "encrypt but do not verify the
-  // certificate", which is an open door to a machine in the middle. Where the
-  // URL asks for TLS, verification is turned on explicitly.
-  const wantsTls = /[?&]sslmode=require/.test(connectionString);
+  // The TLS mode has to be settled in the URL, not in the `ssl` option: when the
+  // connection string carries an `sslmode`, node-postgres resolves TLS from it and
+  // discards whatever was passed alongside. An earlier version of this file set
+  // `ssl: { rejectUnauthorized: true }` next to an `sslmode=require` URL, and measuring
+  // `client.connectionParameters.ssl` showed `{}` — a guard that could not fire.
+  //
+  // The modes below are the ones pg 8 treats as aliases for `verify-full`, so today they
+  // already verify. pg 9 and pg-connection-string 3 will adopt libpq semantics, where they
+  // encrypt without verifying; rewriting to `verify-full` now means this keeps verifying
+  // across that change instead of quietly stopping.
+  const secured = connectionString.replace(
+    /([?&]sslmode=)(require|prefer|verify-ca)/i,
+    "$1verify-full",
+  );
 
   return new Pool({
-    connectionString,
-    ssl: wantsTls ? { rejectUnauthorized: true } : undefined,
+    connectionString: secured,
     max: options.max ?? 5,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
@@ -62,7 +71,13 @@ export async function withTenant<T>(
     await client.query("COMMIT");
     return result;
   } catch (error) {
-    await client.query("ROLLBACK");
+    // Guarded: a failing rollback would otherwise replace the error that caused it, and
+    // the original is the one worth seeing.
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      /* keep the original error */
+    }
     throw error;
   } finally {
     client.release();
@@ -86,7 +101,13 @@ export async function withoutTenant<T>(
     await client.query("COMMIT");
     return result;
   } catch (error) {
-    await client.query("ROLLBACK");
+    // Guarded: a failing rollback would otherwise replace the error that caused it, and
+    // the original is the one worth seeing.
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      /* keep the original error */
+    }
     throw error;
   } finally {
     client.release();
