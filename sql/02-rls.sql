@@ -36,9 +36,15 @@ $$ LANGUAGE sql STABLE;
 -- test/leak-without-force.sql, which demonstrates the hole.
 --
 -- USING filters what a statement can SEE. WITH CHECK constrains what it may
--- WRITE. They are separate clauses and a policy with only USING will happily
--- let one tenant insert a row belonging to another — see
--- test/leak-without-with-check.sql.
+-- WRITE. Omitting WITH CHECK is not a hole — PostgreSQL falls back to the USING
+-- expression for writes — but writing both is still right: the day somebody
+-- widens USING for a reporting view, a policy that relies on the fallback
+-- widens writes at the same time, silently.
+--
+-- Two things that ARE holes, each with a script that reproduces it: a table
+-- added to the schema and not to this array (test/leak-forgotten-table.sql),
+-- and a second PERMISSIVE policy, which combines with OR and so can only widen
+-- access (test/leak-extra-permissive-policy.sql).
 
 DO $$
 DECLARE

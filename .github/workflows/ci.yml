@@ -85,8 +85,11 @@ jobs:
       - name: Reproduce the leak when the setting is not transaction-scoped
         run: psql "$APP" -v ON_ERROR_STOP=1 -f test/leak-without-local.sql
 
-      - name: Reproduce the leak when WITH CHECK is missing
-        run: psql "$OWNER" -v ON_ERROR_STOP=1 -f test/leak-without-with-check.sql
+      - name: Reproduce the leak when a table is added and the policy is not
+        run: psql "$OWNER" -v ON_ERROR_STOP=1 -f test/leak-forgotten-table.sql
+
+      - name: Reproduce the leak when a second permissive policy is added
+        run: psql "$OWNER" -v ON_ERROR_STOP=1 -f test/leak-extra-permissive-policy.sql
 
       - name: Reproduce the superuser bypass
         run: psql "$SUPER" -v ON_ERROR_STOP=1 -f test/leak-as-superuser.sql

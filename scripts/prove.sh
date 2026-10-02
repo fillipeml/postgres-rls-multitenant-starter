@@ -37,7 +37,8 @@ psql "$SUPER" -v ON_ERROR_STOP=1 -q -f /test/00-setup-demos.sql
 say "reproducing each way to get this wrong"
 psql "$OWNER" -v ON_ERROR_STOP=1 -f /test/leak-without-force.sql
 psql "$APP"   -v ON_ERROR_STOP=1 -f /test/leak-without-local.sql
-psql "$OWNER" -v ON_ERROR_STOP=1 -f /test/leak-without-with-check.sql
+psql "$OWNER" -v ON_ERROR_STOP=1 -f /test/leak-forgotten-table.sql
+psql "$OWNER" -v ON_ERROR_STOP=1 -f /test/leak-extra-permissive-policy.sql
 psql "$SUPER" -v ON_ERROR_STOP=1 -f /test/leak-as-superuser.sql
 
-printf '\nAll four guarantees hold, and all four leaks reproduce.\n'
+printf '\nAll four guarantees hold, and every leak reproduces.\n'

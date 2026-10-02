@@ -1,7 +1,7 @@
 # postgres-rls-multitenant-starter
 
 Multi-tenant isolation enforced by PostgreSQL rather than by your application code: the four
-guarantees **proven** as an unprivileged role, and the four ways to get it wrong **reproduced**
+guarantees **proven** as an unprivileged role, and the ways to get it wrong **reproduced**
 so the holes are visible rather than described.
 
 ![CI](https://github.com/fillipeml/postgres-rls-multitenant-starter/actions/workflows/ci.yml/badge.svg) ![Licence: MIT](https://img.shields.io/badge/licence-MIT-informational)
@@ -19,10 +19,11 @@ ISOLATION PROVEN: all four guarantees hold.
 == reproducing each way to get this wrong
 NOTICE:  LEAK REPRODUCED: tenant A is set, a policy exists, and the owner still sees 2 rows
 NOTICE:  LEAK REPRODUCED: a transaction that set no tenant inherited aaaaaaaa-… and sees 2 project(s)
-NOTICE:  LEAK REPRODUCED: tenant B wrote a row belonging to tenant A, and now sees 0 of them
+NOTICE:  LEAK REPRODUCED: tenant A is set and this table has no policy, so all 2 rows are visible
+NOTICE:  LEAK REPRODUCED: a second permissive policy was ADDED and tenant A now sees all 2 rows
 NOTICE:  LEAK REPRODUCED: tenant A is set and FORCE is on, and the superuser sees all 3 projects
 
-All four guarantees hold, and all four leaks reproduce.
+All four guarantees hold, and every leak reproduces.
 ```
 
 ## The problem
@@ -48,7 +49,8 @@ at all.
 - An unprivileged application role, separate from the role that owns the tables.
 - A four-guarantee proof that refuses to run as a superuser, because a superuser bypasses
   row-level security and would pass while proving nothing.
-- Four demonstrations that each reproduce a specific hole, and then close it.
+- Four demonstrations that each reproduce a specific hole, and then close it — plus one
+  claim that turned out to be wrong, and the assertion that caught it.
 - A client helper for Node showing the application half of the rule, proven through a pool
   capped at one connection.
 
@@ -83,9 +85,13 @@ END LOOP;
 
 `ENABLE` turns policies on for everyone except the table's owner. `FORCE` includes the owner —
 and in a small deployment the owner is usually the role the application connects with, because
-migrations and the app share one connection string. `USING` filters reads; `WITH CHECK`
-constrains writes. They are separate clauses, and omitting the second isolates reads while
-leaving writes wide open.
+migrations and the app share one connection string. `USING` filters reads and `WITH CHECK`
+constrains writes; both are written out rather than relying on the fallback, for the reason
+below.
+
+A loop, rather than a block per table, because the failure that actually happens is a table
+added to the schema and not to the list. One array in one file is something a reviewer can count
+against the schema, and CI counts it for them.
 
 **The context is scoped to the transaction.**
 
@@ -102,7 +108,7 @@ concatenation on the one value that decides who sees what.
 **The application connects as nobody important.** Tables owned by one role, used by another with
 exactly four privileges and no more. It cannot create a table, alter a policy, or drop anything.
 
-## The four holes, reproduced
+## The holes, reproduced
 
 Each of these is a script that asserts the leak happens, so if a future PostgreSQL closes one,
 CI fails and this document is wrong rather than quietly stale.
@@ -111,11 +117,22 @@ CI fails and this document is wrong rather than quietly stale.
 | --- | --- |
 | [`leak-without-force.sql`](test/leak-without-force.sql) | `ENABLE` without `FORCE`: a policy exists, a tenant is set, and the table's **owner** still sees every row |
 | [`leak-without-local.sql`](test/leak-without-local.sql) | A session-scoped setting survives the commit, so the next transaction on that connection **inherits a tenant it never set** |
-| [`leak-without-with-check.sql`](test/leak-without-with-check.sql) | A `USING`-only policy: one tenant **writes a row belonging to another**, and then cannot see what it wrote |
+| [`leak-forgotten-table.sql`](test/leak-forgotten-table.sql) | A table added to the schema and **not to the policy list**: no policy means nothing to fail, so every tenant sees every row |
+| [`leak-extra-permissive-policy.sql`](test/leak-extra-permissive-policy.sql) | Permissive policies combine with **OR**, so a second one *added* for a reporting view can only widen access — and reads, in review, like tightening |
 | [`leak-as-superuser.sql`](test/leak-as-superuser.sql) | A superuser ignores row-level security entirely, which is why the proof refuses to run as one |
 
-The third is the subtlest. Reads look perfectly isolated, every test you would think to write
-passes, and the hole only appears on writes.
+The forgotten table is the one that actually happens. The policies are right, the proof passes,
+and six months later a migration adds a table and not its policy. That is why the list is a loop
+over an explicit array and why CI counts the protected tables against `pg_class` on every push,
+rather than trusting that somebody looked.
+
+**One hole that is not a hole, and cost me a CI run to find out.** A policy with `USING` and no
+`WITH CHECK` looks like it would isolate reads and leave writes open. It does not: PostgreSQL
+falls back to the `USING` expression for writes. The demonstration asserting otherwise failed,
+which is exactly what an assertion is for — a documented claim that stops being true should
+break the build rather than quietly mislead. Writing both clauses is still right, because the
+day somebody widens `USING` for a reporting view, a policy relying on the fallback widens writes
+at the same moment and says nothing.
 
 ## Running it
 
