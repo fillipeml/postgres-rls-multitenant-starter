@@ -1,0 +1,11 @@
+/node_modules
+.env
+.env.*
+!.env.example
+sanitize-report.*
+.claude/settings.local.json
+.claude/*.local.*
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,34 @@
+# One command, from nothing to the isolation proven:
+#
+#   docker compose up --abort-on-container-exit
+#
+# Starts PostgreSQL, applies the schema, the policies, the roles and the seed,
+# then runs the four guarantees as the unprivileged role and reproduces each of
+# the four ways to get this wrong. The exit code is the result.
+
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: rls_demo
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d rls_demo"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  prove:
+    image: postgres:18
+    depends_on:
+      db: { condition: service_healthy }
+    volumes:
+      - ./sql:/sql:ro
+      - ./test:/test:ro
+      - ./scripts:/scripts:ro
+    environment:
+      SUPER: postgres://postgres:postgres@db:5432/rls_demo
+      APP: postgres://app_user:local_dev_only@db:5432/rls_demo
+      OWNER: postgres://demo_owner:local_dev_only@db:5432/rls_demo
+    entrypoint: ["bash", "/scripts/prove.sh"]

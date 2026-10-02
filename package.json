@@ -1,0 +1,19 @@
+{
+  "name": "postgres-rls-multitenant-starter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-tenant isolation enforced by PostgreSQL row-level security, with the four guarantees proven and the four ways to get it wrong demonstrated",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "prove": "node --experimental-strip-types client/prove.ts"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5"
+  }
+}

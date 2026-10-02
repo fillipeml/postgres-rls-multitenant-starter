@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prove:
+    name: apply, prove isolation, reproduce every leak
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: rls_demo
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGDATABASE: rls_demo
+      SUPER: "postgres://postgres:postgres@localhost:5432/rls_demo"
+      APP: "postgres://app_user:local_dev_only@localhost:5432/rls_demo"
+      OWNER: "postgres://demo_owner:local_dev_only@localhost:5432/rls_demo"
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Apply the schema, the policies, the roles and the seed
+        run: |
+          for f in sql/01-schema.sql sql/02-rls.sql sql/03-roles.sql sql/04-seed.sql; do
+            echo "== $f"
+            psql "$SUPER" -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+
+      - name: Every table except the tenant root has a FORCE policy
+        run: |
+          psql "$SUPER" -v ON_ERROR_STOP=1 -t -A -c "
+            SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public' AND c.relkind = 'r'
+              AND c.relname <> 'tenant'
+              AND (NOT c.relrowsecurity OR NOT c.relforcerowsecurity);" | tee unprotected.txt
+          [ "$(cat unprotected.txt)" = "0" ]
+
+      - name: The four guarantees hold, run as the unprivileged role
+        run: psql "$APP" -v ON_ERROR_STOP=1 -f test/isolation.sql
+
+      - name: The isolation test refuses to run as a superuser
+        run: |
+          if psql "$SUPER" -v ON_ERROR_STOP=1 -f test/isolation.sql; then
+            echo "the guard did not fire: the test passed as a superuser"; exit 1
+          fi
+          echo "ok: the test refused to run as a superuser"
+
+      - name: Set up the leak demonstrations
+        run: psql "$SUPER" -v ON_ERROR_STOP=1 -q -f test/00-setup-demos.sql
+
+      - name: Reproduce the leak when FORCE is missing
+        run: psql "$OWNER" -v ON_ERROR_STOP=1 -f test/leak-without-force.sql
+
+      - name: Reproduce the leak when the setting is not transaction-scoped
+        run: psql "$APP" -v ON_ERROR_STOP=1 -f test/leak-without-local.sql
+
+      - name: Reproduce the leak when WITH CHECK is missing
+        run: psql "$OWNER" -v ON_ERROR_STOP=1 -f test/leak-without-with-check.sql
+
+      - name: Reproduce the superuser bypass
+        run: psql "$SUPER" -v ON_ERROR_STOP=1 -f test/leak-as-superuser.sql
+
+      - name: The client helper upholds the rule through a real pool
+        run: npm run prove
+        env:
+          DATABASE_URL: postgres://app_user:local_dev_only@localhost:5432/rls_demo
+
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

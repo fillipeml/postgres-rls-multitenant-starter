@@ -1,0 +1,199 @@
+# postgres-rls-multitenant-starter
+
+Multi-tenant isolation enforced by PostgreSQL rather than by your application code: the four
+guarantees **proven** as an unprivileged role, and the four ways to get it wrong **reproduced**
+so the holes are visible rather than described.
+
+![CI](https://github.com/fillipeml/postgres-rls-multitenant-starter/actions/workflows/ci.yml/badge.svg) ![Licence: MIT](https://img.shields.io/badge/licence-MIT-informational)
+
+```
+$ docker compose up --abort-on-container-exit
+
+== the four guarantees, as the unprivileged role
+NOTICE:  ok 1: with no tenant set, zero rows are visible
+NOTICE:  ok 2: tenant A sees only tenant A
+NOTICE:  ok 3: tenant B sees only tenant B
+NOTICE:  ok 4: the database refused the cross-tenant write
+ISOLATION PROVEN: all four guarantees hold.
+
+== reproducing each way to get this wrong
+NOTICE:  LEAK REPRODUCED: tenant A is set, a policy exists, and the owner still sees 2 rows
+NOTICE:  LEAK REPRODUCED: a transaction that set no tenant inherited aaaaaaaa-… and sees 2 project(s)
+NOTICE:  LEAK REPRODUCED: tenant B wrote a row belonging to tenant A, and now sees 0 of them
+NOTICE:  LEAK REPRODUCED: tenant A is set and FORCE is on, and the superuser sees all 3 projects
+
+All four guarantees hold, and all four leaks reproduce.
+```
+
+## The problem
+
+Every multi-tenant application has a rule: a query must never return another tenant's rows. The
+usual place to enforce it is the application — a `WHERE tenant_id = ?` on every query, or an
+ORM scope, or a repository base class.
+
+That works until the one query that forgets. There is no error when it does. The symptom is a
+customer seeing another customer's data, and the gap between the mistake and the discovery is
+usually measured in months.
+
+Moving the rule into the database changes the failure mode. A forgotten tenant returns **zero
+rows** instead of everything — a bug you find in development rather than a leak you do not find
+at all.
+
+## What it does
+
+- A policy on every table, created in a loop so adding a table and forgetting the policy is one
+  visible omission rather than a silent one.
+- A tenant function whose *absence* of a value denies, so the safe behaviour is the default.
+- Transaction-scoped tenant context, which is what makes this safe behind a connection pool.
+- An unprivileged application role, separate from the role that owns the tables.
+- A four-guarantee proof that refuses to run as a superuser, because a superuser bypasses
+  row-level security and would pass while proving nothing.
+- Four demonstrations that each reproduce a specific hole, and then close it.
+- A client helper for Node showing the application half of the rule, proven through a pool
+  capped at one connection.
+
+## How it works
+
+Four moving parts, each load-bearing.
+
+**The tenant function denies by default.**
+
+```sql
+CREATE FUNCTION current_tenant() RETURNS uuid AS $$
+    SELECT nullif(current_setting('app.tenant_id', true), '')::uuid;
+$$ LANGUAGE sql STABLE;
+```
+
+The `true` is `missing_ok`. An unset variable returns NULL rather than raising, and NULL equals
+nothing — so a connection that forgot to set a tenant sees zero rows. That property is the whole
+design: safety comes from how an absent value behaves, not from a check somebody remembered.
+
+**The policies are applied in a loop.**
+
+```sql
+FOREACH t IN ARRAY ARRAY['account', 'project', 'note'] LOOP
+    EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
+    EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
+    EXECUTE format(
+        'CREATE POLICY tenant_isolation_%s ON %I '
+        'USING (tenant_id = current_tenant()) '
+        'WITH CHECK (tenant_id = current_tenant())', t, t);
+END LOOP;
+```
+
+`ENABLE` turns policies on for everyone except the table's owner. `FORCE` includes the owner —
+and in a small deployment the owner is usually the role the application connects with, because
+migrations and the app share one connection string. `USING` filters reads; `WITH CHECK`
+constrains writes. They are separate clauses, and omitting the second isolates reads while
+leaving writes wide open.
+
+**The context is scoped to the transaction.**
+
+```sql
+SELECT set_config('app.tenant_id', $1, true);
+```
+
+The third argument makes it `SET LOCAL`: the value dies at COMMIT or ROLLBACK. Without it the
+setting lives for the session — and a session is a connection, which goes back to the pool and
+is handed to the next request. The tenant is also passed as a parameter rather than
+interpolated, because `SET` takes no parameters and the obvious workaround is string
+concatenation on the one value that decides who sees what.
+
+**The application connects as nobody important.** Tables owned by one role, used by another with
+exactly four privileges and no more. It cannot create a table, alter a policy, or drop anything.
+
+## The four holes, reproduced
+
+Each of these is a script that asserts the leak happens, so if a future PostgreSQL closes one,
+CI fails and this document is wrong rather than quietly stale.
+
+| Script | What it shows |
+| --- | --- |
+| [`leak-without-force.sql`](test/leak-without-force.sql) | `ENABLE` without `FORCE`: a policy exists, a tenant is set, and the table's **owner** still sees every row |
+| [`leak-without-local.sql`](test/leak-without-local.sql) | A session-scoped setting survives the commit, so the next transaction on that connection **inherits a tenant it never set** |
+| [`leak-without-with-check.sql`](test/leak-without-with-check.sql) | A `USING`-only policy: one tenant **writes a row belonging to another**, and then cannot see what it wrote |
+| [`leak-as-superuser.sql`](test/leak-as-superuser.sql) | A superuser ignores row-level security entirely, which is why the proof refuses to run as one |
+
+The third is the subtlest. Reads look perfectly isolated, every test you would think to write
+passes, and the hole only appears on writes.
+
+## Running it
+
+```bash
+docker compose up --abort-on-container-exit     # everything, from nothing
+```
+
+Or against a PostgreSQL you already have:
+
+```bash
+export SUPER='postgres://postgres:...@localhost:5432/rls_demo'
+export APP='postgres://app_user:local_dev_only@localhost:5432/rls_demo'
+export OWNER='postgres://demo_owner:local_dev_only@localhost:5432/rls_demo'
+./scripts/prove.sh
+```
+
+And the client half, which the SQL cannot prove:
+
+```bash
+npm ci
+DATABASE_URL="$APP" npm run prove
+```
+
+That one runs through a pool **capped at a single connection**, so every query is guaranteed to
+reuse the same physical connection. That is the condition under which a session-scoped setting
+leaks; a larger pool would pass by luck.
+
+## Using it in an application
+
+```typescript
+import { createPool, withTenant } from "./client/db.ts";
+
+const pool = createPool();
+
+const projects = await withTenant(pool, session.tenantId, async (client) =>
+  (await client.query("SELECT id, name FROM project ORDER BY name")).rows,
+);
+```
+
+No `WHERE tenant_id = ?`. The query says what it wants and the database decides what it is
+allowed to have. The rule for the rest of the codebase is one sentence: **every read and every
+write goes through this helper**, because outside it the policies return nothing.
+
+That is the property worth having. A developer who forgets gets an empty result in development,
+not a leak in production.
+
+## What this does not solve
+
+**Resolving the tenant from the request.** This repository takes a tenant id and scopes a
+transaction to it. Deciding *which* tenant a request belongs to — from a session, a subdomain, a
+token claim — is the application's job, and it is the step where the actual authorisation bug
+usually lives. Getting the database half right does not make the other half safe.
+
+**Noisy neighbours.** Shared tables mean shared indexes, shared cache and shared autovacuum. One
+tenant's traffic affects another's latency, and no policy changes that.
+
+**Per-tenant encryption or data residency.** If a tenant must have its data in a different
+jurisdiction or under its own key, row-level security in a shared table is the wrong shape and a
+database per tenant is the right one.
+
+**Performance at scale.** The policy is a predicate evaluated per row, so a composite index
+leading with the tenant column is usually what you want, and `EXPLAIN` on a hot query is worth
+doing before assuming this is free.
+
+## Where it comes from
+
+Extracted from a production customer-relationship system for a law firm, where the same
+mechanism protects 29 tables and the isolation was proven the same way before the first pilot
+user logged in. The write-up of that system is in
+[portfolio](https://github.com/fillipeml/portfolio/blob/main/case-studies/law-firm-crm.md);
+this is the part of it that is generic, with the domain replaced by three invented tables.
+
+## Built with
+
+PostgreSQL 18 and nothing else on the database side — no extension, no sidecar, no proxy. The
+client helper is Node 24 with native type stripping and `pg`. The whole thing is about 500 lines
+and most of them are comments explaining why.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
