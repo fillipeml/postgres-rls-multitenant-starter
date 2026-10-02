@@ -16,8 +16,9 @@ $$;
 
 CREATE SCHEMA IF NOT EXISTS demo AUTHORIZATION demo_owner;
 GRANT USAGE ON SCHEMA demo TO app_user;
--- demo_owner reads the seeded tables in the contrast half of two demonstrations.
+-- demo_owner needs the schema itself because the demonstrations call current_tenant()
+-- and set_tenant() unqualified. It is given no rights over the seeded tables: the only
+-- demonstration that read them was the WITH CHECK one, removed when its premise proved wrong.
 GRANT USAGE ON SCHEMA public TO demo_owner;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO demo_owner;
 GRANT EXECUTE ON FUNCTION current_tenant() TO demo_owner;
 GRANT EXECUTE ON FUNCTION set_tenant(uuid) TO demo_owner;

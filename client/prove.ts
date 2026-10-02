@@ -49,10 +49,17 @@ try {
         [TENANT_A, "injected@northwind.example", "Injected"],
       );
       return "accepted";
-    } catch {
+    } catch (error) {
+      // Only a policy refusal counts. Catching everything would have reported success for a
+      // typo in the table name or a dropped connection — a proof that passes when the thing
+      // it proves is absent. These are the two SQLSTATEs test/isolation.sql accepts:
+      // 42501 insufficient_privilege, raised by a WITH CHECK refusal, and 23514
+      // check_violation.
+      const code = (error as { code?: string }).code;
+      if (code !== "42501" && code !== "23514") throw error;
       return "refused";
     }
-  }).catch(() => "refused");
+  });
   check(crossTenant === "refused", "a cross-tenant write is refused by the database");
 
   // A failure inside the transaction must not leave the tenant behind either.
