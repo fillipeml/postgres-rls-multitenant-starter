@@ -49,8 +49,9 @@ at all.
 - An unprivileged application role, separate from the role that owns the tables.
 - A four-guarantee proof that refuses to run as a superuser, because a superuser bypasses
   row-level security and would pass while proving nothing.
-- Four demonstrations that each reproduce a specific hole, and then close it — plus one
-  claim that turned out to be wrong, and the assertion that caught it.
+- Four demonstrations that each reproduce a specific hole, and then close it — plus a
+  written record of a fifth claim that turned out to be wrong, and of the CI run that
+  disproved it before anybody read it.
 - A client helper for Node showing the application half of the rule, proven through a pool
   capped at one connection.
 
@@ -205,11 +206,49 @@ user logged in. The write-up of that system is in
 [portfolio](https://github.com/fillipeml/portfolio/blob/main/case-studies/law-firm-crm.md);
 this is the part of it that is generic, with the domain replaced by three invented tables.
 
+## How AI was used
+
+No model is involved at runtime. There is no model in this repository at all.
+
+An AI coding assistant was used to build it, and the thing worth recording is a claim it got
+wrong. The repository originally carried a fifth demonstration asserting that a policy with
+`USING` and no `WITH CHECK` leaves writes unprotected. That is false: PostgreSQL falls back to
+the `USING` expression for writes when `WITH CHECK` is absent, so the "leak" could not be
+reproduced. The assertion failed in CI before anyone read the README, which is the only reason
+the claim never shipped — and the reason every demonstration here asserts that its hole exists
+rather than describing it in a comment. A demonstration that merely narrates cannot be wrong
+out loud.
+
+Two smaller ones, both caught by measuring rather than by reading. `createPool` set
+`ssl: { rejectUnauthorized: true }` next to an `sslmode=require` URL; printing
+`client.connectionParameters.ssl` showed `{}`, because node-postgres resolves TLS from the
+connection string and discards what was passed beside it — a guard that could not fire, next to
+a comment that described the opposite of what pg 8 actually does. And the cross-tenant write
+check caught every error rather than a policy refusal, so it would have reported success for a
+typo in the table name.
+
+**Validated:** CI applies the schema against a real PostgreSQL 18, counts unprotected tables
+against `pg_class`, runs the four guarantees as the unprivileged role, asserts the superuser
+guard fires, and reproduces all five holes. It does that by running `scripts/prove.sh`, the
+same entry point `docker compose up` uses, so the two cannot drift.
+
+## Data and privacy
+
+Nothing here is real and nothing here is private.
+
+Every tenant, person, e-mail address and invoice in `sql/04-seed.sql` is invented, and every
+e-mail domain is under the `.example` TLD reserved by RFC 2606 for exactly this. There is no
+production data of any kind, and no data of any kind that came from anywhere else.
+
+The credentials are deliberately visible: `local_dev_only` and the compose file's `postgres`
+password belong to a throwaway container that exists for the length of one `docker compose up`.
+They are placeholders, not secrets, and `SECURITY.md` says so.
+
 ## Built with
 
 PostgreSQL 18 and nothing else on the database side — no extension, no sidecar, no proxy. The
-client helper is Node 24 with native type stripping and `pg`. The whole thing is about 500 lines
-and most of them are comments explaining why.
+client helper is Node 24 with native type stripping and `pg`. The mechanism — `sql/`, `client/`,
+`test/` and `scripts/` — is about 900 lines, roughly a third of them comments explaining why.
 
 ## Licence
 
